@@ -55,7 +55,7 @@ MIDIDevice  pushMidi(myusb);
 // If pad/button LEDs don't light, the Push exposes its data on the other
 // virtual cable - change this 0 <-> 1. (Input works on either; only LED/display
 // OUTPUT needs the right cable.)
-const uint8_t PUSH_CABLE = 0;
+const uint8_t PUSH_CABLE = 1;
 
 PushDevice  push(pushMidi, PUSH_CABLE);
 Sequencer   seq;
@@ -87,7 +87,7 @@ uint8_t    activeCount = 0;
 // PLAY (melodic) mode -- isomorphic layout: +1 semitone per column, +ROW per row.
 uint8_t      playBase          = 36;  // MIDI note of the bottom-left pad
 uint8_t      noteChannel       = 1;
-const int8_t PLAY_ROW_INTERVAL = 5;   // semitones per row up. 5 = "fourths" (Push
+const int8_t PLAY_ROW_INTERVAL = 4;   // semitones per row up. 5 = "fourths" (Push
                                       // default); 12 = octave-per-row; 8 = the old
                                       // continuous-chromatic layout.
 
@@ -121,6 +121,7 @@ void renderTopRow();
 void renderSeqPads();
 void renderSeqColumn(uint8_t col);
 void renderNotePads();
+void renderOctaveButtons();
 void renderDrumPads();
 void renderDisplay();
 
@@ -305,8 +306,8 @@ void onPushControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
   if (val < 64) return;
 
   switch (cc) {
-    case CC_PLAY:    running ? stopTransport() : startTransport(); renderModeButtons(); break;
-    case CC_RECORD:  recording = !recording; renderModeButtons(); break;
+    case CC_PLAY:    running ? stopTransport() : startTransport(); renderModeButtons(); renderOctaveButtons(); break;
+    case CC_RECORD:  recording = !recording; renderModeButtons(); renderOctaveButtons(); break;
     case CC_NOTE:
       // Toggle PLAY <-> DRUM; if coming from the sequencer, resume last pad mode.
       mode = (mode == MODE_SEQ) ? lastNoteMode
@@ -361,6 +362,7 @@ void onPushChannelAT(uint8_t ch, uint8_t pressure) {
 // ===========================================================================
 void renderAll() {
   renderModeButtons();
+  renderOctaveButtons(); 
   renderRightColumn();
   renderTopRow();
   if      (mode == MODE_SEQ)  renderSeqPads();
@@ -412,6 +414,12 @@ void renderNotePads() {
       push.setPad(x, y, root ? CLR_BLUE : CLR_DIMGREY);
     }
   }
+}
+
+
+void renderOctaveButtons() {
+  push.setButton(CC_OCTAVE_UP, BTN_LIT);
+    push.setButton(CC_OCTAVE_DN, BTN_LIT);
 }
 
 void renderDrumPads() {
