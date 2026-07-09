@@ -58,7 +58,7 @@ MIDIDevice  pushMidi(myusb);
 // If pad/button LEDs don't light, the Push exposes its data on the other
 // virtual cable - change this 0 <-> 1. (Input works on either; only LED/display
 // OUTPUT needs the right cable.)
-const uint8_t PUSH_CABLE = 0;
+const uint8_t PUSH_CABLE = 1;
 
 PushDevice  push(pushMidi, PUSH_CABLE);
 Sequencer   seq;
@@ -561,18 +561,18 @@ void renderDisplay() {
 
   if (mode == MODE_SEQ) {
     Track& tr = seq.track(selectedTrack);
-    snprintf(l, sizeof(l), "Trk %u %-6s Note %3u Vel %3u Ch %2u %s",
+    snprintf(l, sizeof(l), "Trk %u %-6s     Note %3u Vel %3u Ch %2u %s",
              selectedTrack + 1, trackName(selectedTrack),
              tr.note, tr.velocity, tr.channel, tr.muted ? "MUTE" : "");
     push.setText(2, 0, l);
   } else if (mode == MODE_DRUM) {
     DrumPad& p = drumPads[selectedDrumPad];
-    snprintf(l, sizeof(l), "Pad(%u,%u)  Note %3u %-2s  Ch %2u   [Tempo=ch Swing=note]",
+    snprintf(l, sizeof(l), "Pad(%u,%u)         Note %3u %-2s[Swng]Ch %2u     [Tempo]",
              selectedDrumPad % 8, selectedDrumPad / 8,
              p.note, NOTE_NAMES[p.note % 12], p.channel);
     push.setText(2, 0, l);
   } else {  // MODE_PLAY
-    snprintf(l, sizeof(l), "Base %3u %-2s  Root %-2s  Ch %2u  Row +%d",
+    snprintf(l, sizeof(l), "Base %3u %-2s      Root %-2s  Row +%d  MIDI Ch %2u  ",
              playBase, NOTE_NAMES[playBase % 12], NOTE_NAMES[rootPitch],
              noteChannel, (int)PLAY_ROW_INTERVAL);
     push.setText(2, 0, l);
