@@ -1,0 +1,55 @@
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:40:2: warning: #warning "Set Tools > USB Type to a MIDI option (e.g. 'MIDI' or 'Serial + MIDI')." [-Wcpp]
+   40 | #warning "Set Tools > USB Type to a MIDI option (e.g. 'MIDI' or 'Serial + MIDI')."
+      |  ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void setup()':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:130:12: error: 'class MIDIDevice' has no member named 'setHandleAftertouchPoly'; did you mean 'setHandleAfterTouchPoly'?
+  130 |   pushMidi.setHandleAftertouchPoly(onPushPolyAT);
+      |            ^~~~~~~~~~~~~~~~~~~~~~~
+      |            setHandleAfterTouchPoly
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:131:12: error: 'class MIDIDevice' has no member named 'setHandleAftertouch'; did you mean 'setHandleAfterTouch'?
+  131 |   pushMidi.setHandleAftertouch(onPushChannelAT);
+      |            ^~~~~~~~~~~~~~~~~~~
+      |            setHandleAfterTouch
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void loop()':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:140:10: error: 'usbMIDI' was not declared in this scope
+  140 |   while (usbMIDI.read())  { }   // drain the iPad side (room for future sync/feedback)
+      |          ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void startTransport()':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:177:3: error: 'usbMIDI' was not declared in this scope
+  177 |   usbMIDI.sendRealTime(usbMIDI.Start);
+      |   ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void stopTransport()':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:182:3: error: 'usbMIDI' was not declared in this scope
+  182 |   usbMIDI.sendRealTime(usbMIDI.Stop);
+      |   ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void onClockTick()':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:189:3: error: 'usbMIDI' was not declared in this scope
+  189 |   usbMIDI.sendRealTime(usbMIDI.Clock);   // keep iPad apps in sync
+      |   ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void fireStep()':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:205:7: error: 'usbMIDI' was not declared in this scope
+  205 |       usbMIDI.sendNoteOn(tr.note, tr.velocity, tr.channel);
+      |       ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void stopActiveNotes()':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:221:5: error: 'usbMIDI' was not declared in this scope
+  221 |     usbMIDI.sendNoteOff(active[i].note, 0, active[i].channel);
+      |     ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void onPushNoteOn(uint8_t, uint8_t, uint8_t)':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:238:5: error: 'usbMIDI' was not declared in this scope
+  238 |     usbMIDI.sendNoteOn(out, vel, noteChannel);
+      |     ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void onPushNoteOff(uint8_t, uint8_t, uint8_t)':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:255:5: error: 'usbMIDI' was not declared in this scope
+  255 |     usbMIDI.sendNoteOff(padToOutNote(note), 0, noteChannel);
+      |     ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void onPushPolyAT(uint8_t, uint8_t, uint8_t)':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:320:5: error: 'usbMIDI' was not declared in this scope
+  320 |     usbMIDI.sendAfterTouchPoly(padToOutNote(note), val, noteChannel);
+      |     ^~~~~~~
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino: In function 'void onPushChannelAT(uint8_t, uint8_t)':
+/Users/johan/Documents/Arduino/teensy_and_push1/PushController/PushController.ino:325:5: error: 'usbMIDI' was not declared in this scope
+  325 |     usbMIDI.sendAfterTouch(pressure, noteChannel);
+      |     ^~~~~~~
+exit status 1
+
+Compilation error: 'class MIDIDevice' has no member named 'setHandleAftertouchPoly'; did you mean 'setHandleAfterTouchPoly'?

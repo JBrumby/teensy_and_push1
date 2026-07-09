@@ -6,30 +6,34 @@
 //  Signal path:
 //    iPad  <--USB(device)--  Teensy  --USB(host)-->  Push 1
 //
-//  The Teensy is a USB MIDI *device* to the iPad (so iPad synth/sampler apps see
-//  it as a class-compliant MIDI port) and a USB MIDI *host* to the Push.
-//
 //  REQUIRED IDE SETTINGS (Arduino IDE + Teensyduino):
 //    Tools > Board    : Teensy 3.6
 //    Tools > USB Type : "MIDI"  (or "Serial + MIDI" to keep the Serial Monitor)
 //  REQUIRED LIBRARY : USBHost_t36 (bundled with Teensyduino)
 //
-//  Three modes:
-//    PLAY MODE     - 8x8 pads play melodically (isomorphic layout) to the iPad.
-//    DRUM MODE     - bottom-left 4x4 pads are 16 drum sounds (GM kit, ch 10).
-//    SEQUENCER     - the 8x8 grid is the pattern: rows = tracks, columns = steps.
-//                    Tap a pad to toggle a step. A playhead column sweeps across.
+//  Three modes (Note button toggles PLAY<->DRUM; Session selects SEQUENCER):
+//    PLAY  - isomorphic melodic layout (+1 semitone per column, +PLAY_ROW_INTERVAL
+//            per row). All pads that play a given note light green together.
+//            Arrows transpose; pads out of MIDI range stay dark.
+//    DRUM  - all 64 pads, one per-pad {note, channel}. The grid is 4 colored
+//            quadrants; each quadrant defaults to notes 36..51 on channel 10.
+//            Tap a pad to select it, then dial its channel/note with Tempo/Swing.
+//    SEQ   - 8x8 grid is the pattern: rows = tracks, columns = steps.
+//
+//  Shared across all modes:
+//    The 8 display encoders (CC71..78) are assignable CC controllers. 32 values
+//    are kept (4 groups x 8). Step groups with the broken arrows (CC62/63).
 //
 //  Controls:
-//    Play (CC85)          start/stop transport (also emits MIDI Start/Stop/Clock)
-//    Record (CC86)        toggles a record flag (stub - extend as you like)
-//    Note (CC50)          toggle PLAY <-> DRUM    Session (CC51)  SEQUENCER mode
-//    Tempo encoder (CC14) change BPM
-//    Encoder 1 (CC71)     change selected track's NOTE     (sequencer)
-//    Encoder 2 (CC72)     change selected track's VELOCITY (sequencer)
-//    Right column (36-43) select a track                   (sequencer)
-//    Top row (20-27)      mute/unmute track 0..7            (sequencer)
-//    Octave Up/Down       PLAY: shift by an octave   DRUM: shift by a 16-pad bank
+//    Play (85)     start/stop transport        Record (86)   record flag (stub)
+//    Note (50)     toggle PLAY <-> DRUM         Session (51)  SEQUENCER
+//    Broken arrows (62/63)  previous / next CC-encoder group      (all modes)
+//    Encoders 71-78         send assigned CC                      (all modes)
+//    Tempo encoder (14)     SEQ: BPM   PLAY: note channel   DRUM: sel-pad channel
+//    Swing encoder (15)     PLAY: root note      DRUM: sel-pad note number
+//    Arrows L/R/U/D (44-47) PLAY: transpose +1 / -1 / +row / -row
+//    Octave Up/Down (55/54) PLAY: transpose by +/- 12
+//    Right column (36-43)   SEQ: select a track   Top row (20-27) SEQ: mute track
 // =============================================================================
 #include <USBHost_t36.h>
 #include "Push1Defs.h"
@@ -42,7 +46,6 @@
 #endif
 
 // Set to 1 to print every incoming Push message to the Serial Monitor.
-// Use this to discover the exact note/CC of any control on your unit.
 #define PUSH_DEBUG 1
 
 // ---------------------------------------------------------------------------
@@ -55,7 +58,7 @@ MIDIDevice  pushMidi(myusb);
 // If pad/button LEDs don't light, the Push exposes its data on the other
 // virtual cable - change this 0 <-> 1. (Input works on either; only LED/display
 // OUTPUT needs the right cable.)
-const uint8_t PUSH_CABLE = 1;
+const uint8_t PUSH_CABLE = 0;
 
 PushDevice  push(pushMidi, PUSH_CABLE);
 Sequencer   seq;
@@ -76,27 +79,40 @@ const uint8_t CLOCKS_PER_STEP = 12;   // 12 = eighth notes; 6 = sixteenth notes
 uint32_t usPerClock      = 0;
 uint32_t lastClockMicros = 0;
 uint8_t  clockCount      = 0;
-uint8_t  curStep         = 0;         // step about to play
-int      playCol         = -1;        // currently sounding column (-1 = none)
+uint8_t  curStep         = 0;
+int      playCol         = -1;
 
-// Notes started this step, to be stopped at the next step (gate = 1 step)
 struct ActiveNote { uint8_t note, channel; };
 ActiveNote active[SEQ_TRACKS];
 uint8_t    activeCount = 0;
 
-// PLAY (melodic) mode -- isomorphic layout: +1 semitone per column, +ROW per row.
-uint8_t      playBase          = 36;  // MIDI note of the bottom-left pad
-uint8_t      noteChannel       = 1;
-const int8_t PLAY_ROW_INTERVAL = 4;   // semitones per row up. 5 = "fourths" (Push
-                                      // default); 12 = octave-per-row; 8 = the old
-                                      // continuous-chromatic layout.
+// ---- PLAY (melodic) mode --------------------------------------------------
+// Isomorphic layout: note = playBase + row*PLAY_ROW_INTERVAL + column.
+const int8_t PLAY_ROW_INTERVAL = 4;   // semitones per row up (4 = major-3rd rows)
+uint8_t playBase    = 36;             // MIDI note of the bottom-left pad (transposes)
+uint8_t rootPitch   = 0;              // 0..11 pitch class highlighted (0 = C)
+uint8_t noteChannel = 1;              // 1..16
 
-// DRUM mode -- bottom-left 4x4 block -> drumBase..drumBase+15.
-uint8_t       drumBase    = 36;       // bottom-left pad (kick); GM kit starts at 36
-uint8_t       drumChannel = 10;       // GM percussion channel
-const uint8_t DRUM_W = 4, DRUM_H = 4; // size of the drum-pad block (cols x rows)
+// ---- DRUM mode ------------------------------------------------------------
+// All 64 pads, each with its own note+channel. Grid = 4 colored 4x4 quadrants.
+struct DrumPad { uint8_t note; uint8_t channel; };
+DrumPad drumPads[64];
+uint8_t selectedDrumPad = 0;          // pad currently being edited (0..63)
+
+// ---- Assignable CC encoders (shared by every mode) ------------------------
+// The 8 display encoders drive these. 32 total = CC_GROUPS x 8; step the active
+// group with the broken arrows. Edit ccCtl[] defaults below to set each
+// encoder's CC number and MIDI channel.
+const uint8_t CC_GROUPS = 4;
+const uint8_t CC_TOTAL  = CC_GROUPS * 8;   // 32
+struct CCCtl { uint8_t ccNum; uint8_t channel; uint8_t value; };
+CCCtl   ccCtl[CC_TOTAL];
+uint8_t ccGroup = 0;                   // active group 0..CC_GROUPS-1
 
 bool pushReady = false;
+
+static const char* const NOTE_NAMES[12] =
+  { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
 
 // ---------------------------------------------------------------------------
 //  Forward declarations
@@ -114,6 +130,12 @@ void onClockTick();
 void fireStep();
 void stopActiveNotes();
 
+void initDrumPads();
+void initCCCtl();
+void handleCCEncoder(uint8_t e, int8_t d);
+void transposePlay(int semis);
+void selectDrumPad(uint8_t idx);
+
 void renderAll();
 void renderModeButtons();
 void renderRightColumn();
@@ -121,15 +143,16 @@ void renderTopRow();
 void renderSeqPads();
 void renderSeqColumn(uint8_t col);
 void renderNotePads();
-void renderOctaveButtons();
 void renderDrumPads();
+void lightPlayNote(int outNote, bool pressed);
 void renderDisplay();
 
 uint8_t     trackColor(uint8_t t);
 const char* trackName(uint8_t t);
-uint8_t     padToPlayNote(uint8_t padNote);
-bool        padIsDrum(uint8_t padNote);
-uint8_t     padToDrumNote(uint8_t padNote);
+int         playNoteRaw(uint8_t x, uint8_t y);
+bool        playValid(int n);
+uint8_t     drumQuadColor(uint8_t idx);
+uint8_t     drumPadColor(uint8_t idx);
 
 // ===========================================================================
 //  setup / loop
@@ -145,15 +168,16 @@ void setup() {
   pushMidi.setHandleAfterTouch(onPushChannelAT);
 
   seq.begin();
+  initDrumPads();
+  initCCCtl();
   recalcTempo();
 }
 
 void loop() {
   myusb.Task();
   while (pushMidi.read()) { }   // dispatch all queued Push events to the callbacks
-  while (usbMIDI.read())  { }   // drain the iPad side (room for future sync/feedback)
+  while (usbMIDI.read())  { }   // drain the iPad side
 
-  // (re)initialise the Push whenever it connects
   bool connected = (pushMidi.idVendor() != 0);
   if (connected && !pushReady) {
     push.begin();
@@ -165,13 +189,36 @@ void loop() {
     if (PUSH_DEBUG) Serial.println(F("Push disconnected."));
   }
 
-  // Internal clock: emit ticks; "while" catches up if a loop ran long.
   if (running) {
     uint32_t now = micros();
     while ((uint32_t)(now - lastClockMicros) >= usPerClock) {
       lastClockMicros += usPerClock;
       onClockTick();
     }
+  }
+}
+
+// ===========================================================================
+//  One-time data init
+// ===========================================================================
+void initDrumPads() {
+  // Each 4x4 quadrant gets an identical drum-rack layout: bottom-left of the
+  // quadrant = note 36, +1 per column, +4 per row. Channel 10 (GM percussion).
+  for (uint8_t i = 0; i < 64; i++) {
+    uint8_t x = i % 8, y = i / 8;
+    uint8_t lx = x % 4, ly = y % 4;                 // position within the quadrant
+    drumPads[i].note    = (uint8_t)(36 + ly * 4 + lx);
+    drumPads[i].channel = 10;
+  }
+}
+
+void initCCCtl() {
+  // DEFAULTS - edit freely. Each entry = { CC number, MIDI channel, start value }.
+  // Index i maps to group (i / 8), encoder (i % 8).
+  for (uint8_t i = 0; i < CC_TOTAL; i++) {
+    ccCtl[i].ccNum   = (uint8_t)(1 + i);   // CC 1..32
+    ccCtl[i].channel = 1;                  // channel 1
+    ccCtl[i].value   = 0;
   }
 }
 
@@ -200,7 +247,7 @@ void stopTransport() {
 }
 
 void onClockTick() {
-  usbMIDI.sendRealTime(usbMIDI.Clock);   // keep iPad apps in sync
+  usbMIDI.sendRealTime(usbMIDI.Clock);
   if (++clockCount >= CLOCKS_PER_STEP) {
     clockCount = 0;
     fireStep();
@@ -208,7 +255,7 @@ void onClockTick() {
 }
 
 void fireStep() {
-  stopActiveNotes();                     // end previous step's notes
+  stopActiveNotes();
 
   int prevCol = playCol;
   playCol = curStep;
@@ -221,7 +268,6 @@ void fireStep() {
     }
   }
 
-  // Light only the columns that changed (cheap, no full-grid refresh)
   if (mode == MODE_SEQ) {
     if (prevCol >= 0) renderSeqColumn((uint8_t)prevCol);
     renderSeqColumn((uint8_t)playCol);
@@ -242,20 +288,22 @@ void stopActiveNotes() {
 void onPushNoteOn(uint8_t ch, uint8_t note, uint8_t vel) {
   if (PUSH_DEBUG) Serial.printf("NoteOn  ch=%u note=%u vel=%u cable=%u\n", ch, note, vel, pushMidi.getCable());
 
-  // Velocity 0 == note off (running-status style)
   if (vel == 0) { onPushNoteOff(ch, note, 0); return; }
-
   if (!pushIsPadNote(note)) return;      // ignore encoder-touch notes etc.
 
   if (mode == MODE_PLAY) {
-    usbMIDI.sendNoteOn(padToPlayNote(note), vel, noteChannel);
-    push.setPadByNote(note, CLR_GREEN);
+    int n = playNoteRaw(pushPadX(note), pushPadY(note));
+    if (!playValid(n)) return;           // out-of-range (dark) pad -> silent
+    usbMIDI.sendNoteOn((uint8_t)n, vel, noteChannel);
+    lightPlayNote(n, true);              // light EVERY pad that plays this note
   } else if (mode == MODE_DRUM) {
-    if (!padIsDrum(note)) return;        // only the 4x4 block is live
-    usbMIDI.sendNoteOn(padToDrumNote(note), vel, drumChannel);
+    uint8_t idx = (uint8_t)(note - PUSH_PAD_BASE_NOTE);   // 0..63
+    selectDrumPad(idx);
+    DrumPad& p = drumPads[idx];
+    usbMIDI.sendNoteOn(p.note, vel, p.channel);
     push.setPadByNote(note, CLR_GREEN);
   } else {  // MODE_SEQ
-    uint8_t track = pushPadY(note);      // bottom row = track 0
+    uint8_t track = pushPadY(note);
     uint8_t step  = pushPadX(note);
     seq.toggleStep(track, step);
     selectedTrack = track;
@@ -269,14 +317,15 @@ void onPushNoteOff(uint8_t ch, uint8_t note, uint8_t vel) {
   if (!pushIsPadNote(note)) return;
 
   if (mode == MODE_PLAY) {
-    usbMIDI.sendNoteOff(padToPlayNote(note), 0, noteChannel);
-    // restore resting color: highlight pads whose pitch class == the base note
-    bool root = (padToPlayNote(note) % 12) == (playBase % 12);
-    push.setPadByNote(note, root ? CLR_BLUE : CLR_DIMGREY);
+    int n = playNoteRaw(pushPadX(note), pushPadY(note));
+    if (!playValid(n)) return;
+    usbMIDI.sendNoteOff((uint8_t)n, 0, noteChannel);
+    lightPlayNote(n, false);             // restore resting color on all its pads
   } else if (mode == MODE_DRUM) {
-    if (!padIsDrum(note)) return;
-    usbMIDI.sendNoteOff(padToDrumNote(note), 0, drumChannel);
-    push.setPadByNote(note, CLR_AMBER);  // restore drum-pad color
+    uint8_t idx = (uint8_t)(note - PUSH_PAD_BASE_NOTE);
+    DrumPad& p = drumPads[idx];
+    usbMIDI.sendNoteOff(p.note, 0, p.channel);
+    push.setPadByNote(note, drumPadColor(idx));
   }
 }
 
@@ -286,54 +335,78 @@ void onPushControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
   // ---- Encoders (relative) ----
   if (pushIsEncoderCC(cc)) {
     int8_t d = pushEncoderDelta(val);
-    if (cc == CC_ENCODER_TEMPO) {
-      bpm = constrain(bpm + d, 30.0f, 300.0f);
-      recalcTempo();
-      renderDisplay();
-    } else if (cc == CC_ENCODER_1 && mode == MODE_SEQ) {
-      Track& tr = seq.track(selectedTrack);
-      tr.note = (uint8_t)constrain((int)tr.note + d, 0, 127);
-      renderDisplay();
-    } else if (cc == (CC_ENCODER_1 + 1) && mode == MODE_SEQ) {  // encoder 2
-      Track& tr = seq.track(selectedTrack);
-      tr.velocity = (uint8_t)constrain((int)tr.velocity + d, 1, 127);
-      renderDisplay();
+
+    // Top 8 display encoders -> assignable CC controllers (all modes).
+    if (cc >= CC_ENCODER_1 && cc <= (uint8_t)(CC_ENCODER_1 + 7)) {
+      handleCCEncoder((uint8_t)(cc - CC_ENCODER_1), d);
+      return;
     }
-    return;
+
+    // Tempo encoder: BPM (seq) / note channel (play) / selected-pad channel (drum)
+    if (cc == CC_ENCODER_TEMPO) {
+      if (mode == MODE_SEQ) {
+        bpm = constrain(bpm + d, 30.0f, 300.0f);
+        recalcTempo();
+      } else if (mode == MODE_PLAY) {
+        noteChannel = (uint8_t)constrain((int)noteChannel + d, 1, 16);
+      } else {
+        DrumPad& p = drumPads[selectedDrumPad];
+        p.channel = (uint8_t)constrain((int)p.channel + d, 1, 16);
+      }
+      renderDisplay();
+      return;
+    }
+
+    // Swing encoder: root note (play) / selected-pad note number (drum)
+    if (cc == CC_ENCODER_SWING) {
+      if (mode == MODE_PLAY) {
+        rootPitch = (uint8_t)((((int)rootPitch + d) % 12 + 12) % 12);
+        renderNotePads();
+      } else if (mode == MODE_DRUM) {
+        DrumPad& p = drumPads[selectedDrumPad];
+        p.note = (uint8_t)constrain((int)p.note + d, 0, 127);
+      }
+      renderDisplay();
+      return;
+    }
+    return;   // master encoder etc. - unused
   }
 
-  // ---- Buttons: act on press (value >= 64), ignore release ----
+  // ---- Buttons: act on press (value >= 64) ----
   if (val < 64) return;
 
   switch (cc) {
-    case CC_PLAY:    running ? stopTransport() : startTransport(); renderModeButtons(); renderOctaveButtons(); break;
-    case CC_RECORD:  recording = !recording; renderModeButtons(); renderOctaveButtons(); break;
+    case CC_PLAY:    running ? stopTransport() : startTransport(); renderModeButtons(); break;
+    case CC_RECORD:  recording = !recording; renderModeButtons(); break;
+
     case CC_NOTE:
-      // Toggle PLAY <-> DRUM; if coming from the sequencer, resume last pad mode.
       mode = (mode == MODE_SEQ) ? lastNoteMode
                                 : (mode == MODE_PLAY ? MODE_DRUM : MODE_PLAY);
       lastNoteMode = mode;
       renderAll();
       break;
-    case CC_SESSION: mode = MODE_SEQ;  renderAll(); break;
+    case CC_SESSION: mode = MODE_SEQ; renderAll(); break;
 
-    case CC_OCTAVE_UP:
-      if (mode == MODE_PLAY && playBase <= 115)      { playBase += 12; renderNotePads(); renderDisplay(); }
-      else if (mode == MODE_DRUM && drumBase <= 96)  { drumBase += 16; renderDrumPads(); renderDisplay(); }
-      break;
-    case CC_OCTAVE_DN:
-      if (mode == MODE_PLAY && playBase >= 12)       { playBase -= 12; renderNotePads(); renderDisplay(); }
-      else if (mode == MODE_DRUM && drumBase >= 16)  { drumBase -= 16; renderDrumPads(); renderDisplay(); }
-      break;
+    // PLAY-mode transpose
+    case CC_LEFT:      if (mode == MODE_PLAY) transposePlay(+1); break;
+    case CC_RIGHT:     if (mode == MODE_PLAY) transposePlay(-1); break;
+    case CC_UP:        if (mode == MODE_PLAY) transposePlay(+PLAY_ROW_INTERVAL); break;
+    case CC_DOWN:      if (mode == MODE_PLAY) transposePlay(-PLAY_ROW_INTERVAL); break;
+    case CC_OCTAVE_UP: if (mode == MODE_PLAY) transposePlay(+12); break;
+    case CC_OCTAVE_DN: if (mode == MODE_PLAY) transposePlay(-12); break;
+
+    // CC-encoder group paging (all modes)
+    case CC_PAGE_LEFT:  ccGroup = (uint8_t)((ccGroup + CC_GROUPS - 1) % CC_GROUPS); renderDisplay(); break;
+    case CC_PAGE_RIGHT: ccGroup = (uint8_t)((ccGroup + 1) % CC_GROUPS);             renderDisplay(); break;
 
     default:
-      // Right column (36..43, top..bottom) selects a track.
+      // Right column (36..43, top..bottom) selects a track (sequencer).
       if (cc >= CC_RIGHT_COL_TOP && cc <= CC_RIGHT_COL_TOP + 7 && mode == MODE_SEQ) {
-        selectedTrack = (uint8_t)(43 - cc);   // top button -> top row (track 7)
+        selectedTrack = (uint8_t)(43 - cc);
         renderRightColumn();
         renderDisplay();
       }
-      // Top row (20..27) mutes track 0..7.
+      // Top row (20..27) mutes track 0..7 (sequencer).
       else if (cc >= CC_UPPER_ROW_1 && cc <= CC_UPPER_ROW_1 + 7 && mode == MODE_SEQ) {
         uint8_t t = (uint8_t)(cc - CC_UPPER_ROW_1);
         seq.track(t).muted = !seq.track(t).muted;
@@ -346,15 +419,53 @@ void onPushControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
 
 void onPushPolyAT(uint8_t ch, uint8_t note, uint8_t val) {
   if (!pushIsPadNote(note)) return;
-  if (mode == MODE_PLAY)
-    usbMIDI.sendAfterTouchPoly(padToPlayNote(note), val, noteChannel);
-  else if (mode == MODE_DRUM && padIsDrum(note))
-    usbMIDI.sendAfterTouchPoly(padToDrumNote(note), val, drumChannel);
+  if (mode == MODE_PLAY) {
+    int n = playNoteRaw(pushPadX(note), pushPadY(note));
+    if (playValid(n)) usbMIDI.sendAfterTouchPoly((uint8_t)n, val, noteChannel);
+  } else if (mode == MODE_DRUM) {
+    DrumPad& p = drumPads[note - PUSH_PAD_BASE_NOTE];
+    usbMIDI.sendAfterTouchPoly(p.note, val, p.channel);
+  }
 }
 
 void onPushChannelAT(uint8_t ch, uint8_t pressure) {
-  if (mode == MODE_PLAY)      usbMIDI.sendAfterTouch(pressure, noteChannel);
-  else if (mode == MODE_DRUM) usbMIDI.sendAfterTouch(pressure, drumChannel);
+  if (mode == MODE_PLAY)
+    usbMIDI.sendAfterTouch(pressure, noteChannel);
+  else if (mode == MODE_DRUM)
+    usbMIDI.sendAfterTouch(pressure, drumPads[selectedDrumPad].channel);
+}
+
+// ===========================================================================
+//  Mode-specific actions
+// ===========================================================================
+void handleCCEncoder(uint8_t e, int8_t d) {
+  uint8_t i = (uint8_t)(ccGroup * 8 + e);
+  CCCtl& c = ccCtl[i];
+  int v = constrain((int)c.value + d, 0, 127);
+  if ((uint8_t)v != c.value) {
+    c.value = (uint8_t)v;
+    usbMIDI.sendControlChange(c.ccNum, c.value, c.channel);
+  }
+  renderDisplay();
+}
+
+void transposePlay(int semis) {
+  int nb = constrain((int)playBase + semis, 0, 127);
+  if (nb != (int)playBase) {
+    playBase = (uint8_t)nb;
+    renderNotePads();
+    renderDisplay();
+  }
+}
+
+void selectDrumPad(uint8_t idx) {
+  if (idx >= 64) return;
+  if (idx != selectedDrumPad) {
+    uint8_t old = selectedDrumPad;
+    selectedDrumPad = idx;
+    push.setPad(old % 8, old / 8, drumQuadColor(old));  // old pad loses its highlight
+  }
+  renderDisplay();
 }
 
 // ===========================================================================
@@ -362,7 +473,6 @@ void onPushChannelAT(uint8_t ch, uint8_t pressure) {
 // ===========================================================================
 void renderAll() {
   renderModeButtons();
-  renderOctaveButtons(); 
   renderRightColumn();
   renderTopRow();
   if      (mode == MODE_SEQ)  renderSeqPads();
@@ -380,7 +490,7 @@ void renderModeButtons() {
 
 void renderRightColumn() {
   for (uint8_t t = 0; t < seq.numTracks(); t++) {
-    uint8_t cc = (uint8_t)(43 - t);                       // track t -> its row button
+    uint8_t cc = (uint8_t)(43 - t);
     push.setButton(cc, (mode == MODE_SEQ && t == selectedTrack) ? BTN_LIT : BTN_DIM);
   }
 }
@@ -397,7 +507,7 @@ void renderSeqPads() {
 
 void renderSeqColumn(uint8_t col) {
   for (uint8_t y = 0; y < seq.numTracks(); y++) {
-    bool on   = seq.stepOn(y, col);                       // row y = track y
+    bool on   = seq.stepOn(y, col);
     bool head = running && (col == (uint8_t)playCol);
     uint8_t color;
     if (head) color = on ? CLR_WHITE : CLR_DIMGREY;
@@ -407,60 +517,72 @@ void renderSeqColumn(uint8_t col) {
 }
 
 void renderNotePads() {
-  // PLAY mode: highlight pads whose pitch class matches the base note (roots).
+  // PLAY mode: root pitch-class highlighted; out-of-range pads dark.
   for (uint8_t y = 0; y < 8; y++) {
     for (uint8_t x = 0; x < 8; x++) {
-      bool root = (padToPlayNote(pushPadNote(x, y)) % 12) == (playBase % 12);
-      push.setPad(x, y, root ? CLR_BLUE : CLR_DIMGREY);
+      int n = playNoteRaw(x, y);
+      if (!playValid(n))                 push.setPad(x, y, CLR_OFF);
+      else if ((n % 12) == rootPitch)    push.setPad(x, y, CLR_BLUE);
+      else                               push.setPad(x, y, CLR_DIMGREY);
     }
   }
 }
 
-
-void renderOctaveButtons() {
-  push.setButton(CC_OCTAVE_UP, BTN_LIT);
-    push.setButton(CC_OCTAVE_DN, BTN_LIT);
+void renderDrumPads() {
+  for (uint8_t i = 0; i < 64; i++)
+    push.setPad(i % 8, i / 8, drumPadColor(i));
 }
 
-void renderDrumPads() {
-  // DRUM mode: light the bottom-left DRUM_W x DRUM_H block; rest off.
-  for (uint8_t y = 0; y < 8; y++)
-    for (uint8_t x = 0; x < 8; x++)
-      push.setPad(x, y, (x < DRUM_W && y < DRUM_H) ? CLR_AMBER : CLR_OFF);
+void lightPlayNote(int outNote, bool pressed) {
+  // Light (or restore) every pad that maps to outNote.
+  for (uint8_t y = 0; y < 8; y++) {
+    for (uint8_t x = 0; x < 8; x++) {
+      int n = playNoteRaw(x, y);
+      if (playValid(n) && n == outNote) {
+        uint8_t rest = ((n % 12) == rootPitch) ? CLR_BLUE : CLR_DIMGREY;
+        push.setPad(x, y, pressed ? CLR_GREEN : rest);
+      }
+    }
+  }
 }
 
 void renderDisplay() {
   char l[PUSH_DISPLAY_COLS + 1];
   push.clearText();
 
-  const char* title =
-    mode == MODE_SEQ  ? "TEENSY x PUSH   -   STEP SEQUENCER" :
-    mode == MODE_DRUM ? "TEENSY x PUSH   -   DRUM MODE"      :
-                        "TEENSY x PUSH   -   PLAY MODE";
+  const char* title = mode == MODE_SEQ  ? "TEENSY x PUSH   -   STEP SEQUENCER" :
+                      mode == MODE_DRUM ? "TEENSY x PUSH   -   DRUM MODE"      :
+                                          "TEENSY x PUSH   -   PLAY MODE";
   push.setLineCentered(0, title);
 
-  snprintf(l, sizeof(l), "BPM %3d     %s%s", (int)bpm,
+  snprintf(l, sizeof(l), "BPM %3d   %s%s", (int)bpm,
            running ? "PLAYING" : "STOPPED", recording ? "  REC" : "");
   push.setText(1, 0, l);
 
   if (mode == MODE_SEQ) {
     Track& tr = seq.track(selectedTrack);
-    snprintf(l, sizeof(l), "Trk %u %-6s  Note %3u  Vel %3u  Ch %2u  %s",
+    snprintf(l, sizeof(l), "Trk %u %-6s Note %3u Vel %3u Ch %2u %s",
              selectedTrack + 1, trackName(selectedTrack),
-             tr.note, tr.velocity, tr.channel, tr.muted ? "MUTED" : "");
+             tr.note, tr.velocity, tr.channel, tr.muted ? "MUTE" : "");
     push.setText(2, 0, l);
-    push.setLineCentered(3, "Pads=steps  RightCol=select  TopRow=mute  Enc1/2=note/vel");
   } else if (mode == MODE_DRUM) {
-    snprintf(l, sizeof(l), "Drum pads %3u-%3u   Channel %2u",
-             drumBase, (uint8_t)(drumBase + DRUM_W * DRUM_H - 1), drumChannel);
+    DrumPad& p = drumPads[selectedDrumPad];
+    snprintf(l, sizeof(l), "Pad(%u,%u)  Note %3u %-2s  Ch %2u   [Tempo=ch Swing=note]",
+             selectedDrumPad % 8, selectedDrumPad / 8,
+             p.note, NOTE_NAMES[p.note % 12], p.channel);
     push.setText(2, 0, l);
-    push.setLineCentered(3, "16 pads=drums   Octave +/-=bank   Note=play   Session=seq");
   } else {  // MODE_PLAY
-    snprintf(l, sizeof(l), "Base note %3u   Row +%d st   Channel %2u",
-             playBase, (int)PLAY_ROW_INTERVAL, noteChannel);
+    snprintf(l, sizeof(l), "Base %3u %-2s  Root %-2s  Ch %2u  Row +%d",
+             playBase, NOTE_NAMES[playBase % 12], NOTE_NAMES[rootPitch],
+             noteChannel, (int)PLAY_ROW_INTERVAL);
     push.setText(2, 0, l);
-    push.setLineCentered(3, "Pads=play   Octave +/-   Note=drum   Session=seq");
   }
+
+  // Line 3: active CC group + its 8 live values.
+  int p = snprintf(l, sizeof(l), "CC G%u ", ccGroup + 1);
+  for (uint8_t i = 0; i < 8; i++)
+    p += snprintf(l + p, sizeof(l) - p, " %3u", ccCtl[ccGroup * 8 + i].value);
+  push.setText(3, 0, l);
 
   push.flushDisplay();
 }
@@ -468,20 +590,25 @@ void renderDisplay() {
 // ===========================================================================
 //  Helpers
 // ===========================================================================
-uint8_t padToPlayNote(uint8_t padNote) {
-  // Isomorphic: +1 semitone per column right, +PLAY_ROW_INTERVAL per row up.
-  int n = (int)playBase + pushPadY(padNote) * PLAY_ROW_INTERVAL + pushPadX(padNote);
-  return (uint8_t)constrain(n, 0, 127);
+int playNoteRaw(uint8_t x, uint8_t y) {
+  return (int)playBase + (int)y * PLAY_ROW_INTERVAL + (int)x;
 }
 
-bool padIsDrum(uint8_t padNote) {
-  return pushPadX(padNote) < DRUM_W && pushPadY(padNote) < DRUM_H;
+bool playValid(int n) {
+  return n >= 0 && n <= 127;
 }
 
-uint8_t padToDrumNote(uint8_t padNote) {
-  // 4x4 block, bottom-left = drumBase, +1 per column, +DRUM_W per row up.
-  int n = (int)drumBase + pushPadY(padNote) * DRUM_W + pushPadX(padNote);
-  return (uint8_t)constrain(n, 0, 127);
+uint8_t drumQuadColor(uint8_t idx) {
+  bool right = (idx % 8) >= 4;
+  bool top   = (idx / 8) >= 4;
+  if (!right && !top) return CLR_AMBER;    // bottom-left
+  if ( right && !top) return CLR_CYAN;     // bottom-right
+  if (!right &&  top) return CLR_MAGENTA;  // top-left
+  return CLR_LIME;                         // top-right
+}
+
+uint8_t drumPadColor(uint8_t idx) {
+  return (idx == selectedDrumPad) ? CLR_WHITE : drumQuadColor(idx);
 }
 
 uint8_t trackColor(uint8_t t) {

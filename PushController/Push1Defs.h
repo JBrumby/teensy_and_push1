@@ -53,15 +53,9 @@ enum PushColor : uint8_t {
   CLR_YELLOW  = 13,
   CLR_LIME    = 17,
   CLR_GREEN   = 21,
-  CLR_SPRING  = 25,
-  CLR_TURQUOISE = 29,
   CLR_CYAN    = 33,
-  CLR_SKY  = 37,
-  CLR_OCEAN  = 41,
   CLR_BLUE    = 45,
-  CLR_ORCHID  = 49,
   CLR_MAGENTA = 53,
-  CLR_PINK  = 57,
 };
 
 // ---- Monochrome button LED states (sent as CC value) ----------------------
@@ -73,17 +67,10 @@ enum PushBtnLed : uint8_t {
 // ---- Control-Change numbers (User mode) -----------------------------------
 enum PushCC : uint8_t {
   // Encoders - send RELATIVE values; touching them sends Note-On/Off.
+  CC_ENCODER_1     = 71,   // 71..78 = the 8 display encoders (left..right)
   CC_ENCODER_TEMPO = 14,
   CC_ENCODER_SWING = 15,
-  CC_ENCODER_1     = 71,   // 71..78 = the 8 display encoders (left..right)
-  CC_ENCODER_2     = 72,
-  CC_ENCODER_3     = 73,
-  CC_ENCODER_4     = 74,
-  CC_ENCODER_5     = 75,
-  CC_ENCODER_6     = 76,
-  CC_ENCODER_7     = 77,
-  CC_ENCODER_8     = 78,
-  CC_ENCODER_MASTER = 79,
+  CC_ENCODER_MASTER= 79,
 
   // Verified button GROUPS (from pushmod):
   CC_UPPER_ROW_1   = 20,   // 20..27  row just under the display (bi-color)
@@ -112,6 +99,8 @@ enum PushCC : uint8_t {
   CC_RIGHT     = 45,
   CC_UP        = 46,
   CC_DOWN      = 47,
+  CC_PAGE_LEFT = 62,   // "broken" arrow / page left  -> previous CC-encoder group
+  CC_PAGE_RIGHT= 63,   // "broken" arrow / page right -> next CC-encoder group
 };
 
 // Encoders are relative: 1..63 = clockwise (+), 65..127 = counter-clockwise (-).
