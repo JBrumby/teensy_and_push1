@@ -5,6 +5,11 @@
 //
 //  Signal path:
 //    iPad  <--USB(device)--  Teensy  --USB(host)-->  Push 1
+//    MIDI TRS  <--Pins 10,GND,3.3V--  Teensy  --USB(host)-->  Push 1
+//  Type B (Novation, Arturia):
+//  T - source/MIDI 4 - 47 ohm - 3.3V
+//  R - sink/MIDI 5   - 47 ohm - pin 10
+//  S - shield/MIDI 2 - GND
 //
 //  REQUIRED IDE SETTINGS (Arduino IDE + Teensyduino):
 //    Tools > Board    : Teensy 3.6
