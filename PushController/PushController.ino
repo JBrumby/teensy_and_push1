@@ -24,6 +24,7 @@
 //            quadrants; each quadrant defaults to notes 36..51 on channel 10.
 //            Tap a pad to select it, then dial its channel/note with Tempo/Swing.
 //    SEQ   - 8x8 grid is the pattern: rows = tracks, columns = steps.
+//    KEYPAD - Hardpush scale Play
 //
 //  Shared across all modes:
 //    The 8 display encoders (CC71..78) are assignable CC controllers. 32 values
@@ -40,10 +41,13 @@
 //    Octave Up/Down (55/54) PLAY: transpose by +/- 12
 //    Right column (36-43)   SEQ: select a track   Top row (20-27) SEQ: mute track
 // =============================================================================
+
 #include <USBHost_t36.h>
 #include "Push1Defs.h"
 #include "PushDevice.h"
 #include "Sequencer.h"
+#include <SD.h>
+#include "Hardpush.h"
 
 #if !defined(USB_MIDI_SERIAL) && !defined(USB_MIDI) && !defined(USB_MIDI4) && \
     !defined(USB_MIDI16) && !defined(USB_MIDI16_SERIAL) && !defined(USB_MIDI4_SERIAL)
@@ -63,15 +67,27 @@ MIDIDevice  pushMidi(myusb);
 // If pad/button LEDs don't light, the Push exposes its data on the other
 // virtual cable - change this 0 <-> 1. (Input works on either; only LED/display
 // OUTPUT needs the right cable.)
-const uint8_t PUSH_CABLE = 1;
+#ifndef PUSH_CABLE
+  //const uint8_t 
+  #define PUSH_CABLE 1
+#endif
 
 PushDevice  push(pushMidi, PUSH_CABLE);
 Sequencer   seq;
+Hardpush hp;
+File config_file;
+
+
+// Forward declarations
+// HARDPUSH-mode render/light helpers
+uint8_t hardpushRestColor(byte padIdx);
+void    renderHardpushPads();
+void    lightHardpushNote(byte outNote, bool pressed);
 
 // ---------------------------------------------------------------------------
 //  App state
 // ---------------------------------------------------------------------------
-enum Mode { MODE_PLAY, MODE_DRUM, MODE_SEQ };
+enum Mode { MODE_PLAY, MODE_DRUM, MODE_HARDPUSH, MODE_SEQ };
 Mode    mode          = MODE_SEQ;
 Mode    lastNoteMode  = MODE_PLAY;   // pad mode the Note button returns to from SEQ
 bool    running       = false;
@@ -176,6 +192,24 @@ void setup() {
   initDrumPads();
   initCCCtl();
   recalcTempo();
+
+  // new Hardpush
+  if (!SD.begin(BUILTIN_SDCARD)) {
+    Serial.println(F("SD-Card init failed"));
+  } else {
+    config_file = SD.open("push1.bin", FILE_WRITE_BEGIN);
+    if (!config_file) {
+      Serial.println(F("SD file open failed"));
+    } else {
+      hp.setPushDevice(push);
+      hp.loadSettings(config_file);
+      Serial.printf("Hardpush presets loaded");
+    }
+  }
+
+  // hp.setPushDevice(push);
+  // hp.loadSettings(config_file);
+  // Serial.println(F("Hardpush presets loaded"));
 }
 
 void loop() {
@@ -201,6 +235,7 @@ void loop() {
       onClockTick();
     }
   }
+  hp.saveIfDirty();   // gibt es noch nicht – nur wenn du das später willst
 }
 
 // ===========================================================================
@@ -307,6 +342,13 @@ void onPushNoteOn(uint8_t ch, uint8_t note, uint8_t vel) {
     DrumPad& p = drumPads[idx];
     usbMIDI.sendNoteOn(p.note, vel, p.channel);
     push.setPadByNote(note, CLR_GREEN);
+  } else if (mode == MODE_HARDPUSH) {
+      Serial.println("Mode is Hardpush");
+      byte padIdx = pushPadY(note) * 8 + pushPadX(note);
+      byte n = hp.pushButtonIndexToAbsoluteNote(padIdx);
+      if (!hp.legalRange(n)) return;
+      usbMIDI.sendNoteOn(n, vel, hp.channel());
+      lightHardpushNote(n, true);
   } else {  // MODE_SEQ
     uint8_t track = pushPadY(note);
     uint8_t step  = pushPadX(note);
@@ -326,6 +368,15 @@ void onPushNoteOff(uint8_t ch, uint8_t note, uint8_t vel) {
     if (!playValid(n)) return;
     usbMIDI.sendNoteOff((uint8_t)n, 0, noteChannel);
     lightPlayNote(n, false);             // restore resting color on all its pads
+  } else if (mode == MODE_HARDPUSH) {
+    byte padIdx = pushPadY(note) * 8 + pushPadX(note);
+    byte n = hp.pushButtonIndexToAbsoluteNote(padIdx);
+    if (!hp.legalRange(n)) return;
+    if (PUSH_DEBUG) Serial.printf("HARD NoteOff pad=%u n=%u ch=%u\n",
+                                  padIdx, n, hp.channel());
+    usbMIDI.sendNoteOff(n, 0, hp.channel());
+    lightHardpushNote(n, false);
+
   } else if (mode == MODE_DRUM) {
     uint8_t idx = (uint8_t)(note - PUSH_PAD_BASE_NOTE);
     DrumPad& p = drumPads[idx];
@@ -354,6 +405,11 @@ void onPushControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
         recalcTempo();
       } else if (mode == MODE_PLAY) {
         noteChannel = (uint8_t)constrain((int)noteChannel + d, 1, 16);
+      } else if (mode == MODE_HARDPUSH) {
+        int nc = constrain((int)hp.channel() + d, 1, 16);
+        if ((byte)nc != hp.channel()) {
+          hp.setChannel((byte)nc);
+        }
       } else {
         DrumPad& p = drumPads[selectedDrumPad];
         p.channel = (uint8_t)constrain((int)p.channel + d, 1, 16);
@@ -367,6 +423,12 @@ void onPushControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
       if (mode == MODE_PLAY) {
         rootPitch = (uint8_t)((((int)rootPitch + d) % 12 + 12) % 12);
         renderNotePads();
+      } else if (mode == MODE_HARDPUSH) {
+        int t = (((int)hp.tonic() + d) % 12 + 12) % 12;
+        if ((byte)t != hp.tonic()) {
+          hp.setTonic((byte)t);
+          renderHardpushPads();
+        }
       } else if (mode == MODE_DRUM) {
         DrumPad& p = drumPads[selectedDrumPad];
         p.note = (uint8_t)constrain((int)p.note + d, 0, 127);
@@ -380,14 +442,92 @@ void onPushControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
   // ---- Buttons: act on press (value >= 64) ----
   if (val < 64) return;
 
+  // Hardpush
+    // ===== HARDPUSH-mode buttons =====
+  if (mode == MODE_HARDPUSH) {
+
+    // Top row 20: Skala durchschalten
+    if (cc == 20) {
+      hp.setScale((hp.scale() + 1) % numberOfScales);
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+    // Top row 21: Tonic durchschalten
+    if (cc == 21) {
+      hp.setTonic((hp.tonic() + 1) % 12);
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+    // Top row 24: Channel 1..16
+    if (cc == 24) {
+      hp.setChannel((hp.channel() % 16) + 1);
+      renderDisplay();
+      return;
+    }
+    // Top row 25: Farbschema
+    if (cc == 25) {
+      hp.setColor((hp.colorScheme() + 1) % numberOfColorSchemes);
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+    // Top row 26: Layout
+    if (cc == 26) {
+      hp.setLayout((hp.layout() + 1) % numberOfLayouts);
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+    // Top row 27: Octave 0..8
+    if (cc == 27) {
+      hp.setOctave((hp.octave() + 1) % 9);
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+
+    // Octave up/down (55/54)
+    if (cc == CC_OCTAVE_UP) {
+      hp.setOctave((byte)constrain((int)hp.octave() + 1, 0, 8));
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+    if (cc == CC_OCTAVE_DN) {
+      hp.setOctave((byte)constrain((int)hp.octave() - 1, 0, 8));
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+
+    // Preset select (102..105)
+    if (cc >= 102 && cc <= 105) {
+      hp.setPreset(cc - 102);
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+    // Page select (106..109)
+    if (cc >= 106 && cc <= 109) {
+      hp.setPage(cc - 106);
+      renderHardpushPads(); renderDisplay();
+      return;
+    }
+  }
+  // end of Hardpush
+
   switch (cc) {
     case CC_PLAY:    running ? stopTransport() : startTransport(); renderModeButtons(); break;
     case CC_RECORD:  recording = !recording; renderModeButtons(); break;
 
     case CC_NOTE:
-      mode = (mode == MODE_SEQ) ? lastNoteMode
-                                : (mode == MODE_PLAY ? MODE_DRUM : MODE_PLAY);
-      lastNoteMode = mode;
+      // mode = (mode == MODE_SEQ) ? lastNoteMode
+      //                           : (mode == MODE_PLAY ? MODE_DRUM : MODE_PLAY);
+      if (mode == MODE_SEQ) {
+        mode = lastNoteMode;                 // aus SEQ zurück in den letzten Pad-Modus
+      } else {
+        switch (mode) {
+          case MODE_PLAY:   mode = MODE_DRUM;     break;
+          case MODE_DRUM:   mode = MODE_HARDPUSH; break;
+          case MODE_HARDPUSH: mode = MODE_PLAY;   break;
+          default:          mode = MODE_PLAY;     break;
+        }
+        lastNoteMode = mode;
+      }
       renderAll();
       break;
     case CC_SESSION: mode = MODE_SEQ; renderAll(); break;
@@ -427,6 +567,11 @@ void onPushPolyAT(uint8_t ch, uint8_t note, uint8_t val) {
   if (mode == MODE_PLAY) {
     int n = playNoteRaw(pushPadX(note), pushPadY(note));
     if (playValid(n)) usbMIDI.sendAfterTouchPoly((uint8_t)n, val, noteChannel);
+  } else if (mode == MODE_HARDPUSH) {
+  byte padIdx = pushPadY(note) * 8 + pushPadX(note);
+  byte n = hp.pushButtonIndexToAbsoluteNote(padIdx);
+  if (hp.legalRange(n))
+    usbMIDI.sendAfterTouchPoly(n, val, hp.channel());
   } else if (mode == MODE_DRUM) {
     DrumPad& p = drumPads[note - PUSH_PAD_BASE_NOTE];
     usbMIDI.sendAfterTouchPoly(p.note, val, p.channel);
@@ -436,6 +581,7 @@ void onPushPolyAT(uint8_t ch, uint8_t note, uint8_t val) {
 void onPushChannelAT(uint8_t ch, uint8_t pressure) {
   if (mode == MODE_PLAY)
     usbMIDI.sendAfterTouch(pressure, noteChannel);
+  else if (mode == MODE_HARDPUSH) usbMIDI.sendAfterTouch(pressure, hp.channel());
   else if (mode == MODE_DRUM)
     usbMIDI.sendAfterTouch(pressure, drumPads[selectedDrumPad].channel);
 }
@@ -473,6 +619,48 @@ void selectDrumPad(uint8_t idx) {
   renderDisplay();
 }
 
+// -----  HARDPUSH_MODE - Helpers
+// ---- HARDPUSH-mode helpers ------------------------------------------------
+uint8_t hardpushRestColor(byte padIdx) {
+  byte n = hp.pushButtonIndexToAbsoluteNote(padIdx);
+  if (!hp.legalRange(n)) return CLR_OFF;
+  byte scheme = hp.colorScheme();
+  if (hp.pushButtonIndexToScaleIndex(padIdx) % scaleSizes[hp.scale()] == 0)
+    return colors[scheme][1];    // Skalen-Grundton (root) -> Palette-Slot 1
+  return colors[scheme][0];      // anderer Skalenton      -> Palette-Slot 0
+}
+
+void renderHardpushPads() {
+  for (uint8_t y = 0; y < 8; y++)
+    for (uint8_t x = 0; x < 8; x++)
+      push.setPad(x, y, hardpushRestColor(y * 8 + x));
+}
+
+void lightHardpushNote(byte outNote, bool pressed) {
+  // byte scheme = hp.colorScheme();
+  // for (uint8_t y = 0; y < 8; y++) {
+  //   for (uint8_t x = 0; x < 8; x++) {
+  //     byte padIdx = y * 8 + x;
+  //     byte n = hp.pushButtonIndexToAbsoluteNote(padIdx);
+  //     if (hp.legalRange(n) && n == outNote)
+  //       push.setPad(x, y, pressed ? colors[scheme][2] : hardpushRestColor(padIdx));
+  //   }
+  // }
+
+  byte scheme = hp.colorScheme();
+  for (uint8_t y = 0; y < 8; y++) {
+    for (uint8_t x = 0; x < 8; x++) {
+      byte padIdx = y * 8 + x;
+      byte n = hp.pushButtonIndexToAbsoluteNote(padIdx);
+      if (hp.legalRange(n) && n == outNote)
+        push.setPad(x, y, pressed ? CLR_GREEN : hardpushRestColor(padIdx));
+    }
+  }
+}
+
+
+
+
 // ===========================================================================
 //  Rendering (LEDs + display)
 // ===========================================================================
@@ -482,15 +670,27 @@ void renderAll() {
   renderTopRow();
   if      (mode == MODE_SEQ)  renderSeqPads();
   else if (mode == MODE_DRUM) renderDrumPads();
-  else                        renderNotePads();
+  else if (mode == MODE_PLAY) renderNotePads();
+  else /* Mode Hardpush*/     renderHardpushPads();
+
   renderDisplay();
 }
 
 void renderModeButtons() {
-  push.setButton(CC_NOTE,    (mode == MODE_PLAY || mode == MODE_DRUM) ? BTN_LIT : BTN_DIM);
-  push.setButton(CC_SESSION, mode == MODE_SEQ  ? BTN_LIT : BTN_DIM);
+  // push.setButton(CC_NOTE,    (mode == MODE_PLAY || mode == MODE_DRUM) ? BTN_LIT : BTN_DIM);
+  // push.setButton(CC_SESSION, mode == MODE_SEQ  ? BTN_LIT : BTN_DIM);
+  // push.setButton(CC_PLAY,    running   ? BTN_LIT : BTN_DIM);
+  // push.setButton(CC_RECORD,  recording ? BTN_LIT_BLINK : BTN_DIM);
+
+  bool padMode = (mode == MODE_PLAY || mode == MODE_DRUM || mode == MODE_HARDPUSH);
+  push.setButton(CC_NOTE,    padMode  ? BTN_LIT : BTN_DIM);
+  push.setButton(CC_SESSION, (mode == MODE_SEQ) ? BTN_LIT : BTN_DIM);
   push.setButton(CC_PLAY,    running   ? BTN_LIT : BTN_DIM);
-  push.setButton(CC_RECORD,  recording ? BTN_LIT_BLINK : BTN_DIM);
+  push.setButton(CC_RECORD,  recording ? BTN_LIT_BLINK : BTN_DIM);  
+
+  bool hp = (mode == MODE_HARDPUSH);
+  push.setButton(CC_OCTAVE_UP, hp ? BTN_LIT : BTN_OFF);
+  push.setButton(CC_OCTAVE_DN, hp ? BTN_LIT : BTN_OFF);
 }
 
 void renderRightColumn() {
@@ -557,6 +757,7 @@ void renderDisplay() {
 
   const char* title = mode == MODE_SEQ  ? "TEENSY x PUSH   -   STEP SEQUENCER" :
                       mode == MODE_DRUM ? "TEENSY x PUSH   -   DRUM MODE"      :
+                      mode == MODE_HARDPUSH ? "TEENSY x Push  -  HARDPUSH PADS":
                                           "TEENSY x PUSH   -   PLAY MODE";
   push.setLineCentered(0, title);
 
@@ -576,7 +777,33 @@ void renderDisplay() {
              selectedDrumPad % 8, selectedDrumPad / 8,
              p.note, NOTE_NAMES[p.note % 12], p.channel);
     push.setText(2, 0, l);
-  } else {  // MODE_PLAY
+  } 
+  
+  else if (mode == MODE_HARDPUSH) {
+    // snprintf(l, sizeof(l), "%-16.16s %-2.2s Ch%2u  %-14.14s  %-10.10s  Oct %u  P%u/%u",
+    //      nameOfScales[hp.scale()],
+    //      nameOfKeys[hp.tonic()],
+    //      hp.channel(),
+    //      nameOfLayouts[hp.layout()],
+    //      nameOfColors[hp.colorScheme()],
+    //      hp.octave(),
+    //      hp.preset() + 1,
+    //      hp.page() + 1);
+    snprintf(l, sizeof(l),
+         "%-8.8s %-8.8s %-7s %-7s Ch%-4u %-8.8s %-8.8s Oct%-3u",
+         nameOfScales[hp.scale()],
+         nameOfKeys[hp.tonic()],
+         "",
+         "",
+         (unsigned)hp.channel(),
+         nameOfColors[hp.colorScheme()],
+         nameOfLayouts[hp.layout()],
+         (unsigned)hp.octave());
+
+    push.setText(2, 0, l);
+}
+  
+  else {  // MODE_PLAY
     snprintf(l, sizeof(l), "Base %3u %-2s      Root %-2s  Row +%d  MIDI Ch %2u  ",
              playBase, NOTE_NAMES[playBase % 12], NOTE_NAMES[rootPitch],
              noteChannel, (int)PLAY_ROW_INTERVAL);
