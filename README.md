@@ -18,6 +18,7 @@ iPad  <-- USB (Teensy = device) --  Teensy 3.6  -- USB (Teensy = host) -->  Push
 - **Transport** — Play starts/stops and sends MIDI **Start/Stop/Clock** (24 PPQN)
   so iPad apps stay in sync. The Tempo encoder sets BPM.
 - **Display** — shows mode, BPM, transport state, and the selected track.
+- **Scales & Modes** - another Pad Mode for different scales and modes 
 
 ## Files
 
